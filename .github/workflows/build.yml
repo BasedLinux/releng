@@ -1,0 +1,146 @@
+name: build-isos
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    - cron: "0 6 * * 1,4"   # Mon/Thu 06:00 UTC
+
+permissions:
+  contents: write   # push flake.lock and (re)publish release
+
+concurrency:
+  group: build-isos
+  cancel-in-progress: true
+
+# Make repo variable available as env.CACHIX_CACHE
+env:
+  CACHIX_CACHE: ${{ vars.CACHIX_CACHE }}
+  GH_TOKEN: ${{ github.token }}   # for gh CLI
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5.0.0
+
+      # QEMU/binfmt so x86_64 runner can execute aarch64 userland
+      - name: Set up QEMU (arm64)
+        uses: docker/setup-qemu-action@v3.6.0
+        with:
+          platforms: arm64
+
+      # Install Nix; declare extra platform so Nix tries aarch64 builds
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31.6.1
+        with:
+          extra_nix_config: |
+            extra-platforms = aarch64-linux
+
+      # Configure Cachix (self-signed)
+      - name: Use Cachix
+        uses: cachix/cachix-action@v16
+        with:
+          name: ${{ env.CACHIX_CACHE }}
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          signingKey: ${{ secrets.CACHIX_SIGNING_KEY }}
+
+      # Keep inputs fresh (do NOT commit yet)
+      - name: nix flake update
+        run: nix flake update
+
+      # Build x86_64 ISO and push paths to Cachix live
+      - name: Build x86_64 ISO
+        run: |
+          cachix watch-exec "$CACHIX_CACHE" -- \
+            nix build .#install-iso --print-build-logs --out-link result-x86
+
+      # Build aarch64 ISO from x86_64 runner (QEMU/binfmt)
+      - name: Build aarch64 ISO
+        run: |
+          cachix watch-exec "$CACHIX_CACHE" -- \
+            nix build .#packages.aarch64-linux.install-iso --print-build-logs --out-link result-arm
+
+      # Normalize names and compute SHAs
+      - name: Prepare artifacts and checksums
+        id: sums
+        run: |
+          set -eu
+          mkdir -p dist
+          X86=(result-x86/iso/*.iso)
+          ARM=(result-arm/iso/*.iso)
+          test -f "${X86[0]}" && cp -f "${X86[0]}" dist/install-iso-x86_64.iso
+          test -f "${ARM[0]}" && cp -f "${ARM[0]}" dist/install-iso-aarch64.iso
+          sha256sum dist/install-iso-x86_64.iso | tee dist/install-iso-x86_64.sha256
+          sha256sum dist/install-iso-aarch64.iso | tee dist/install-iso-aarch64.sha256
+
+      # Compare against current "rolling" release; publish only if changed
+      - name: Determine if publish is needed
+        id: decide
+        run: |
+          set -eu
+          publish_needed=1
+          tmpdir="$(mktemp -d)"
+          if gh release view rolling >/dev/null 2>&1; then
+            gh release download rolling -p "install-iso-*.iso" -D "$tmpdir" || true
+            if [ -f "$tmpdir/install-iso-x86_64.iso" ]; then
+              oldx="$(sha256sum "$tmpdir/install-iso-x86_64.iso" | awk '{print $1}')"
+              newx="$(awk '{print $1}' dist/install-iso-x86_64.sha256)"
+            else oldx=""; newx="x"; fi
+            if [ -f "$tmpdir/install-iso-aarch64.iso" ]; then
+              olda="$(sha256sum "$tmpdir/install-iso-aarch64.iso" | awk '{print $1}')"
+              newa="$(awk '{print $1}' dist/install-iso-aarch64.sha256)"
+            else olda=""; newa="x"; fi
+            if [ "$oldx" = "$newx" ] && [ "$olda" = "$newa" ]; then
+              publish_needed=0
+            fi
+          fi
+          echo "publish=$publish_needed" >> "$GITHUB_OUTPUT"
+
+      # Always upload build artifacts to the workflow run for manual download/debug
+      - name: Upload x86_64 ISO (artifact)
+        uses: actions/upload-artifact@v4
+        with:
+          name: install-iso-x86_64
+          path: dist/install-iso-x86_64.iso
+          if-no-files-found: error
+
+      - name: Upload aarch64 ISO (artifact)
+        uses: actions/upload-artifact@v4
+        with:
+          name: install-iso-aarch64
+          path: dist/install-iso-aarch64.iso
+          if-no-files-found: error
+
+      # Create or update "rolling" release only if content changed
+      - name: Publish release (rolling)
+        if: steps.decide.outputs.publish == '1'
+        run: |
+          set -eu
+          tag=rolling
+          title="Rolling installer ISOs"
+          notes="Automated build from $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            # Replace assets
+            gh release upload "$tag" \
+              dist/install-iso-x86_64.iso \
+              dist/install-iso-aarch64.iso \
+              --clobber
+          else
+            gh release create "$tag" \
+              dist/install-iso-x86_64.iso \
+              dist/install-iso-aarch64.iso \
+              --title "$title" \
+              --notes "$notes"
+          fi
+
+      # Commit updated flake.lock ONLY after successful publish (if we published)
+      - name: Commit updated flake.lock
+        if: steps.decide.outputs.publish == '1'
+        run: |
+          if ! git diff --quiet -- flake.lock; then
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add flake.lock
+            git commit -m "ci: update flake.lock"
+            git push
+          fi
