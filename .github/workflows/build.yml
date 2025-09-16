@@ -68,12 +68,25 @@ jobs:
         with:
           path: dist
 
-      - name: Create new release and upload ISOs
+      - name: Create release named after ISO base
         run: |
           set -euo pipefail
-          tag="beta-$(date +%s)"
-          files="$(find dist -type f -name '*.iso' | sort)"
-          gh release create "$tag" $files \
+          mapfile -t files < <(find dist -type f -name '*.iso' | sort)
+          # Derive common base: strip dir + ".iso" + "-{arch}-linux"
+          bases=()
+          for f in "${files[@]}"; do
+            n="${f##*/}"; n="${n%.iso}"
+            n="${n%-x86_64-linux}"; n="${n%-aarch64-linux}"
+            bases+=("$n")
+          done
+          base="${bases[0]}"
+          for b in "${bases[@]}"; do
+            if [ "$b" != "$base" ]; then
+              # Fallback if bases differ for some reason
+              base="beta-$(date +%s)"
+              break
+            fi
+          done
+          gh release create "$base" "${files[@]}" \
             -R "$GITHUB_REPOSITORY" \
-            --title "Beta ISOs $tag" \
-            --notes "Automated build $tag"
+            --title "$base"
