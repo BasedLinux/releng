@@ -1,4 +1,4 @@
-name: build
+name: build-isos
 
 on:
   push:
@@ -10,7 +10,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: build
+  group: build-isos
   cancel-in-progress: true
 
 env:
@@ -49,7 +49,7 @@ jobs:
       - name: Build ISO
         run: |
           cachix watch-exec "$CACHIX_CACHE" -- \
-            nix build .#${{ matrix.target }} --out-link result
+            nix build .#${{ matrix.target }}
 
       - name: Upload ISO (artifact)
         uses: actions/upload-artifact@v4
@@ -73,4 +73,7 @@ jobs:
           set -euo pipefail
           tag="beta-$(date +%s)"
           files="$(find dist -type f -name '*.iso' | sort)"
-          gh release create "$tag" $files --title "Beta ISOs $tag" --notes "Automated build $tag"
+          gh release create "$tag" $files \
+            -R "$GITHUB_REPOSITORY" \
+            --title "Beta ISOs $tag" \
+            --notes "Automated build $tag"
