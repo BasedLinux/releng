@@ -1,4 +1,4 @@
-name: build-isos
+name: build
 
 on:
   push:
@@ -10,7 +10,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: build-isos
+  group: build
   cancel-in-progress: true
 
 env:
@@ -21,38 +21,23 @@ env:
 
 jobs:
   build:
-    runs-on: ubuntu-24.04
-    steps:
-      - name: Aggressive cleanup
-        run: |
-          set -euxo pipefail
-          df -h
-          sudo rm -rf /usr/lib/jvm
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /usr/share/swift
-          sudo rm -rf /usr/local/.ghcup
-          sudo rm -rf /usr/local/julia*
-          sudo rm -rf /usr/local/lib/android
-          sudo rm -rf /usr/local/share/chromium
-          sudo rm -rf /opt/microsoft /opt/google
-          sudo rm -rf /opt/az
-          sudo rm -rf /usr/local/share/powershell
-          sudo rm -rf /opt/hostedtoolcache
-          df -h
+    strategy:
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+            target: install-iso
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+            target: packages.aarch64-linux.install-iso
+    runs-on: ${{ matrix.runner }}
 
+    steps:
       - name: Checkout
         uses: actions/checkout@v5.0.0
 
-      - name: Set up QEMU (arm64)
-        uses: docker/setup-qemu-action@v3.6.0
-        with:
-          platforms: arm64
-
       - name: Install Nix
         uses: cachix/install-nix-action@v31.6.1
-        with:
-          extra_nix_config: |
-            extra-platforms = aarch64-linux
 
       - name: Use Cachix
         uses: cachix/cachix-action@v16
@@ -61,40 +46,31 @@ jobs:
           authToken: ${{ env.CACHIX_AUTH_TOKEN }}
           signingKey: ${{ env.CACHIX_SIGNING_KEY }}
 
-      - name: Build x86_64 ISO
+      - name: Build ISO
         run: |
           cachix watch-exec "$CACHIX_CACHE" -- \
-            nix build .#install-iso --print-build-logs --out-link result-x86
+            nix build .#${{ matrix.target }} --out-link result
 
-      - name: Build aarch64 ISO
-        run: |
-          cachix watch-exec "$CACHIX_CACHE" -- \
-            nix build .#packages.aarch64-linux.install-iso --print-build-logs --out-link result-arm
-
-      - name: Upload x86_64 ISO (artifact)
+      - name: Upload ISO (artifact)
         uses: actions/upload-artifact@v4
         with:
-          name: install-iso-x86_64
-          path: result-x86/iso/*.iso
+          name: install-iso-${{ matrix.arch }}
+          path: result/iso/*.iso
           if-no-files-found: error
 
-      - name: Upload aarch64 ISO (artifact)
-        uses: actions/upload-artifact@v4
+  publish:
+    needs: build
+    if: ${{ github.ref == 'refs/heads/master' }}
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
         with:
-          name: install-iso-aarch64
-          path: result-arm/iso/*.iso
-          if-no-files-found: error
+          path: dist
 
-      - name: Publish release (rolling)
-        if: ${{ github.ref == 'refs/heads/master' }}
+      - name: Create new release and upload ISOs
         run: |
-          set -eu
-          tag=rolling
-          files="$(echo result-x86/iso/*.iso) $(echo result-arm/iso/*.iso)"
-          title="Rolling installer ISOs"
-          notes="Automated build $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
-          if gh release view "$tag" >/dev/null 2>&1; then
-            gh release upload "$tag" $files --clobber
-          else
-            gh release create "$tag" $files --title "$title" --notes "$notes"
-          fi
+          set -euo pipefail
+          tag="beta-$(date +%s)"
+          files="$(find dist -type f -name '*.iso' | sort)"
+          gh release create "$tag" $files --title "Beta ISOs $tag" --notes "Automated build $tag"
