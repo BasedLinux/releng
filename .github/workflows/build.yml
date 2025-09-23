@@ -1,0 +1,45 @@
+name: Build
+on: [push, workflow_dispatch]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Cleanup
+        run: |
+          sudo time -v rm -rf /usr/lib/jvm /usr/share/dotnet /usr/share/swift /usr/local/.ghcup \
+                      /usr/local/julia* /usr/local/lib/android /usr/local/share/chromium \
+                      /opt/microsoft /opt/google /opt/az /usr/local/share/powershell \
+                      /opt/hostedtoolcache
+          df -h
+
+      - name: Nix
+        uses: cachix/install-nix-action@v31.6.2
+
+      - name: Cachix
+        uses: cachix/cachix-action@v16
+        with:
+          name: ${{ secrets.CACHIX_CACHE }}
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          repository: BasedLinux/bsdpkgs
+          token: ${{ secrets.BSDPKGS_PAT }}
+          fetch-depth: 1
+          persist-credentials: false
+          submodules: false
+
+      - name: ISO
+        run: cachix watch-exec ${{ secrets.CACHIX_CACHE }} -- nix build .#install-iso >/dev/null 2>&1
+
+      - name: System
+        run: cachix watch-exec ${{ secrets.CACHIX_CACHE }} -- nix build >/dev/null 2>&1
