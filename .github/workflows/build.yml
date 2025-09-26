@@ -4,15 +4,9 @@ jobs:
   build:
     strategy:
       matrix:
-        runner: [ubuntu-latest, ubuntu-24.04-arm64]
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: cachix/install-nix-action@v31
-      - uses: actions/checkout@v4
-        with:
-          repository: BasedLinux/bsdpkgs
-          token: ${{ secrets.BSDPKGS_PAT }}
-
       - name: Cleanup
         run: |
           sudo time -v rm -rf /usr/lib/jvm /usr/share/dotnet /usr/share/swift /usr/local/.ghcup \
@@ -20,8 +14,14 @@ jobs:
                       /opt/microsoft /opt/google /opt/az /usr/local/share/powershell \
                       /opt/hostedtoolcache
           df -h
-
-      - name: Setup cache
+      
+      - uses: cachix/install-nix-action@v31
+      - uses: actions/checkout@v4
+        with:
+          repository: BasedLinux/bsdpkgs
+          token: ${{ secrets.BSDPKGS_PAT }}
+      
+      - name: Cache
         run: |
           mkdir -p ~/.aws
           cat > ~/.aws/credentials << EOF
@@ -55,10 +55,12 @@ jobs:
           EOF
           sudo chmod +x /etc/nix/upload-hook.sh
       
-      - name: Build
+      - name: ISO
         run: |
           nix build .#install-iso
           nix-store --query --requisites ./result | xargs nix copy --to 's3://${{ secrets.WASABI_BUCKET }}?endpoint=s3.wasabisys.com&region=us-east-1'
           
-          [[ "${{ matrix.runner }}" == *"arm64"* ]] && nixos-rebuild build --flake .#raspi || nixos-rebuild build --flake .#desktop
-          nix-store --query --requisites ./result | xargs nix copy --to 's3://${{ secrets.WASABI_BUCKET }}?endpoint=s3.wasabisys.com&region=us-east-1'
+      - name: System
+        run: |
+          [[ "${{ matrix.runner }}" == *"arm"* ]] && nixos-rebuild build --flake .#raspi || nixos-rebuild build --flake .#desktop
+          nix copy --to 's3://${{ secrets.WASABI_BUCKET }}?endpoint=s3.wasabisys.com&region=us-east-1' ./result
