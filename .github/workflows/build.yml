@@ -1,22 +1,18 @@
 name: Build
-
-on:
-  push:
-  workflow_dispatch:
-  schedule:
-    - cron: '37 * * * *'
-
-permissions:
-  contents: read
-
+on: [push, workflow_dispatch]
 jobs:
   build:
     strategy:
-      fail-fast: false
       matrix:
-        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+        runner: [ubuntu-latest, ubuntu-24.04-arm64]
     runs-on: ${{ matrix.runner }}
     steps:
+      - uses: cachix/install-nix-action@v31
+      - uses: actions/checkout@v4
+        with:
+          repository: BasedLinux/bsdpkgs
+          token: ${{ secrets.BSDPKGS_PAT }}
+
       - name: Cleanup
         run: |
           sudo time -v rm -rf /usr/lib/jvm /usr/share/dotnet /usr/share/swift /usr/local/.ghcup \
@@ -25,26 +21,44 @@ jobs:
                       /opt/hostedtoolcache
           df -h
 
-      - name: Nix
-        uses: cachix/install-nix-action@v31.6.2
-
-      - name: Cachix
-        uses: cachix/cachix-action@v16
-        with:
-          name: ${{ secrets.CACHIX_CACHE }}
-          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
-
-      - name: Checkout
-        uses: actions/checkout@v5
-        with:
-          repository: BasedLinux/bsdpkgs
-          token: ${{ secrets.BSDPKGS_PAT }}
-          fetch-depth: 1
-          persist-credentials: false
-          submodules: false
-
-      - name: ISO
-        run: cachix watch-exec ${{ secrets.CACHIX_CACHE }} -- nix build .#install-iso >/dev/null 2>&1
-
-      - name: System
-        run: cachix watch-exec ${{ secrets.CACHIX_CACHE }} -- nix build >/dev/null 2>&1
+      - name: Setup cache
+        run: |
+          mkdir -p ~/.aws
+          cat > ~/.aws/credentials << EOF
+          [default]
+          aws_access_key_id = ${{ secrets.WASABI_ACCESS_KEY }}
+          aws_secret_access_key = ${{ secrets.WASABI_SECRET_KEY }}
+          EOF
+          cat > ~/.aws/config << EOF
+          [default]
+          region = us-east-1
+          s3 = 
+              endpoint_url = https://s3.wasabisys.com
+          EOF
+          
+          sudo mkdir -p /etc/nix
+          echo '${{ secrets.NIX_SIGNING_KEY_PRIVATE }}' | sudo tee /etc/nix/signing-key.sec > /dev/null
+          sudo chmod 600 /etc/nix/signing-key.sec
+          
+          sudo tee /etc/nix/nix.conf << EOF
+          substituters = https://s3.wasabisys.com/${{ secrets.WASABI_BUCKET }} https://cache.nixos.org/
+          trusted-public-keys = ${{ secrets.NIX_SIGNING_KEY_PUBLIC }} cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=
+          secret-key-files = /etc/nix/signing-key.sec
+          post-build-hook = /etc/nix/upload-hook.sh
+          EOF
+          
+          sudo tee /etc/nix/upload-hook.sh << 'EOF'
+          #!/bin/bash
+          set -eu
+          export IFS=' '
+          nix copy --to 's3://${{ secrets.WASABI_BUCKET }}?endpoint=s3.wasabisys.com&region=us-east-1' $OUT_PATHS 2>/dev/null || true
+          EOF
+          sudo chmod +x /etc/nix/upload-hook.sh
+      
+      - name: Build
+        run: |
+          nix build .#install-iso
+          nix-store --query --requisites ./result | xargs nix copy --to 's3://${{ secrets.WASABI_BUCKET }}?endpoint=s3.wasabisys.com&region=us-east-1'
+          
+          [[ "${{ matrix.runner }}" == *"arm64"* ]] && nixos-rebuild build --flake .#raspi || nixos-rebuild build --flake .#desktop
+          nix-store --query --requisites ./result | xargs nix copy --to 's3://${{ secrets.WASABI_BUCKET }}?endpoint=s3.wasabisys.com&region=us-east-1'
