@@ -3,6 +3,7 @@ on: [push, workflow_dispatch]
 jobs:
   build:
     strategy:
+      fail-fast: false
       matrix:
         runner: [ubuntu-24.04, ubuntu-24.04-arm]
     runs-on: ${{ matrix.runner }}
@@ -41,7 +42,7 @@ jobs:
           sudo chmod 600 /etc/nix/signing-key.sec
           
           sudo tee /etc/nix/nix.conf << EOF
-          experimental-features = ca-derivations flakes nix-command
+          experimental-features = flakes nix-command
           substituters = https://s3.wasabisys.com/${{ secrets.WASABI_BUCKET }} https://cache.nixos.org/
           trusted-public-keys = ${{ secrets.NIX_SIGNING_KEY_PUBLIC }} cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=
           secret-key-files = /etc/nix/signing-key.sec
